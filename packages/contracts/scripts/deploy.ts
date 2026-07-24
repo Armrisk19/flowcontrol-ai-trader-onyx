@@ -32,8 +32,8 @@ const MAX_GAS_PRICE = ethers.parseUnits(
   process.env.MAX_ONYX_GAS_PRICE_GWEI || "2500",
   "gwei",
 );
-const RPC_ATTEMPTS = 6;
-const RPC_RETRY_MS = 5_000;
+const RPC_ATTEMPTS = 10;
+const RPC_RETRY_MS = 4_000;
 const RECEIPT_POLL_ATTEMPTS = 90;
 const RECEIPT_POLL_MS = 2_000;
 const STATE_POLL_ATTEMPTS = 60;
@@ -47,16 +47,30 @@ function message(error: unknown): string {
 
 function isRetryable(error: unknown): boolean {
   const value = message(error).toLowerCase();
-  return [
+  const transientHttpCodes = [429, 500, 502, 503, 504, 520, 521, 522, 523, 524];
+  const hasTransientCode = transientHttpCodes.some((code) =>
+    value.includes(`error code: ${code}`) ||
+    value.includes(`status ${code}`) ||
+    value.includes(`http ${code}`) ||
+    value.includes(`code ${code}`),
+  );
+
+  return hasTransientCode || [
+    "invalid json-rpc response",
     "headers timeout",
     "und_err_headers_timeout",
     "timeout",
+    "etimedout",
     "econnreset",
+    "econnrefused",
     "socket hang up",
+    "fetch failed",
+    "network error",
     "temporarily unavailable",
     "service unavailable",
     "gateway timeout",
     "bad gateway",
+    "cloudflare",
     "busy",
     "unknown",
     "requested resource not found",
@@ -71,8 +85,12 @@ async function readWithRetry<T>(label: string, read: () => Promise<T>): Promise<
     } catch (error) {
       lastError = error;
       if (!isRetryable(error) || attempt === RPC_ATTEMPTS) throw error;
-      console.log(`${label}: RPC read retry ${attempt}/${RPC_ATTEMPTS}`);
-      await sleep(RPC_RETRY_MS);
+      const delay = Math.min(RPC_RETRY_MS * attempt, 20_000);
+      console.log(
+        `${label}: transient RPC response (${attempt}/${RPC_ATTEMPTS}); ` +
+        `retrying in ${delay / 1000}s`,
+      );
+      await sleep(delay);
     }
   }
   throw lastError;
@@ -139,17 +157,36 @@ async function transactionRequest(
 
 async function waitForReceipt(hash: string): Promise<any> {
   for (let attempt = 1; attempt <= RECEIPT_POLL_ATTEMPTS; attempt += 1) {
-    const receipt = await readWithRetry(`Receipt ${hash}`, () =>
-      ethers.provider.getTransactionReceipt(hash),
-    );
+    let receipt: any = null;
+    try {
+      receipt = await readWithRetry(`Receipt ${hash}`, () =>
+        ethers.provider.getTransactionReceipt(hash),
+      );
+    } catch (error) {
+      if (!isRetryable(error)) throw error;
+      console.log(
+        `Receipt ${hash}: public RPC remained unavailable after retries; ` +
+        `continuing resumable poll ${attempt}/${RECEIPT_POLL_ATTEMPTS}`,
+      );
+      await sleep(RECEIPT_POLL_MS);
+      continue;
+    }
+
     if (receipt) {
       if (receipt.status !== 1) throw new Error(`Transaction reverted: ${hash}`);
 
       while (true) {
-        const head = await readWithRetry("Read confirmation height", () =>
-          ethers.provider.getBlockNumber(),
-        );
-        if (head >= receipt.blockNumber + CONFIRMATIONS - 1) return receipt;
+        try {
+          const head = await readWithRetry("Read confirmation height", () =>
+            ethers.provider.getBlockNumber(),
+          );
+          if (head >= receipt.blockNumber + CONFIRMATIONS - 1) return receipt;
+        } catch (error) {
+          if (!isRetryable(error)) throw error;
+          console.log(
+            `Confirmation height: transient RPC failure for ${hash}; continuing`,
+          );
+        }
         await sleep(RECEIPT_POLL_MS);
       }
     }
@@ -200,7 +237,15 @@ async function waitForState(
   isComplete: () => Promise<boolean>,
 ): Promise<void> {
   for (let attempt = 1; attempt <= STATE_POLL_ATTEMPTS; attempt += 1) {
-    if (await readWithRetry(`${label} state`, isComplete)) return;
+    try {
+      if (await readWithRetry(`${label} state`, isComplete)) return;
+    } catch (error) {
+      if (!isRetryable(error)) throw error;
+      console.log(
+        `${label}: public RPC remained unavailable after retries; ` +
+        `continuing state poll ${attempt}/${STATE_POLL_ATTEMPTS}`,
+      );
+    }
     await sleep(STATE_POLL_MS);
   }
   throw new Error(`${label}: transaction confirmed but expected state was not visible`);
@@ -648,7 +693,7 @@ async function main() {
   console.log("Authority handoff: verified");
 
   const addresses = {
-    version: "0.2.10",
+    version: "0.2.11",
     mode: "resumed-existing-deployment",
     chainId: Number(CHAIN_ID),
     completedAt: new Date().toISOString(),
