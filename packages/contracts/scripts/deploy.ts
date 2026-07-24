@@ -103,31 +103,64 @@ async function transactionOverrides(
   return { gasLimit, gasPrice, type: 0 };
 }
 
-async function confirmDeployment(label: string, contract: any): Promise<string> {
+async function confirmDeployment(
+  label: string,
+  contract: any,
+): Promise<{ address: string; transactionHash: string }> {
   const tx = contract.deploymentTransaction();
   if (!tx) throw new Error(`${label} has no deployment transaction`);
 
+  console.log(`${label}: submitted ${tx.hash}`);
   const receipt = await tx.wait(CONFIRMATIONS);
   if (!receipt || receipt.status !== 1) {
-    throw new Error(`${label} deployment transaction failed`);
+    throw new Error(`${label} deployment transaction failed: ${tx.hash}`);
   }
 
-  const address = await contract.getAddress();
+  const predictedAddress = ethers.getAddress(await contract.getAddress());
+  const receiptAddress = receipt.contractAddress && ethers.isAddress(receipt.contractAddress)
+    ? ethers.getAddress(receipt.contractAddress)
+    : null;
+
+  // Onyx's JSON-RPC relay receipt is the authoritative source for the address
+  // created by a contract-deployment transaction. Ethers may calculate a
+  // different CREATE address locally on networks whose account/nonce model is
+  // relayed into EVM semantics.
+  const candidates = Array.from(new Set([
+    receiptAddress,
+    predictedAddress,
+    receipt.to && ethers.isAddress(receipt.to) ? ethers.getAddress(receipt.to) : null,
+  ].filter((value): value is string => Boolean(value))));
+
+  if (receiptAddress && receiptAddress !== predictedAddress) {
+    console.log(
+      `${label}: receipt address ${receiptAddress} differs from ethers prediction ` +
+      `${predictedAddress}; using the receipt address`,
+    );
+  }
+
   for (let attempt = 1; attempt <= CODE_POLL_ATTEMPTS; attempt += 1) {
-    const code = await ethers.provider.getCode(address);
-    if (code !== "0x") {
-      console.log(
-        `${label}: ${address} ` +
-        `(code visible after ${attempt} check${attempt === 1 ? "" : "s"})`,
-      );
-      return address;
+    for (const candidate of candidates) {
+      const code = await ethers.provider.getCode(candidate);
+      if (code !== "0x") {
+        if (candidate !== receiptAddress && receiptAddress) {
+          throw new Error(
+            `${label}: bytecode appeared at ${candidate}, but the deployment receipt ` +
+            `reported ${receiptAddress}. Refusing an ambiguous deployment.`,
+          );
+        }
+        console.log(
+          `${label}: ${candidate} ` +
+          `(receipt confirmed; code visible after ${attempt} check${attempt === 1 ? "" : "s"})`,
+        );
+        return { address: candidate, transactionHash: tx.hash };
+      }
     }
     await sleep(CODE_POLL_MS);
   }
 
   throw new Error(
-    `${label} was mined but bytecode was not visible through the RPC after ` +
-    `${CODE_POLL_ATTEMPTS * CODE_POLL_MS / 1000}s`,
+    `${label} transaction ${tx.hash} was mined, but bytecode was not visible at ` +
+    `${candidates.join(", ")} after ${CODE_POLL_ATTEMPTS * CODE_POLL_MS / 1000}s`,
   );
 }
 
@@ -139,8 +172,12 @@ async function deployAndConfirm(
 ): Promise<{ contract: any; address: string }> {
   const draft = await factory.getDeployTransaction(...args);
   const overrides = await transactionOverrides(label, signer, draft);
-  const contract = await factory.deploy(...args, overrides);
-  const address = await confirmDeployment(label, contract);
+  const pendingContract = await factory.deploy(...args, overrides);
+  const { address } = await confirmDeployment(label, pendingContract);
+
+  // Always continue with a contract instance attached to the authoritative
+  // address returned by the network receipt, not a locally predicted address.
+  const contract = factory.attach(address).connect(signer);
   return { contract, address };
 }
 
@@ -398,7 +435,7 @@ async function main() {
   }
 
   const addresses = {
-    version: "0.2.8",
+    version: "0.2.9",
     chainId: 327,
     deployedAt: new Date().toISOString(),
     deployer: deployer.address,
