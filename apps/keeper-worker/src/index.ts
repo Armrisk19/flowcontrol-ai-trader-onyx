@@ -45,8 +45,12 @@ function cors(env: Env) {
   };
 }
 
+function jsonReplacer(_key: string, value: unknown) {
+  return typeof value === "bigint" ? value.toString() : value;
+}
+
 function json(env: Env, body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
+  return new Response(JSON.stringify(body, jsonReplacer), {
     status,
     headers: { "content-type": "application/json", ...cors(env) },
   });
@@ -114,7 +118,7 @@ export default {
         `).first<{ total: number; active: number; limited: number }>();
         return json(env, {
           ok: true,
-          version: "0.2.1",
+          version: "0.2.15",
           runtime,
           markets: counts || { total: 0, active: 0, limited: 0 },
           configuredLive: env.LIVE_EXECUTION === "true",
