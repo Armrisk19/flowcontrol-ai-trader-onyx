@@ -1,6 +1,7 @@
 {
-  "buildCommand": "npm run build -w @flowcontrol/web",
-  "outputDirectory": "apps/web/dist",
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
-  "installCommand": "npm install"
+  "installCommand": "npm install",
+  "buildCommand": "npm run build -w @flowcontrol/web && rm -rf dist && cp -R apps/web/dist dist",
+  "outputDirectory": "dist"
 }
