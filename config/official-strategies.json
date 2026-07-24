@@ -1,0 +1,53 @@
+[
+  {
+    "id": 1,
+    "slug": "flow-reserve",
+    "name": "Flow Reserve",
+    "risk": "CONSERVATIVE",
+    "minimumTier": 0,
+    "creatorFeeShareBps": 0,
+    "rules": {
+      "reserveBps": 7000,
+      "rebalanceThresholdBps": 1000,
+      "maxTradeUsd": 100,
+      "maxAssets": 2,
+      "momentumOnly": false,
+      "cooldownSeconds": 21600,
+      "maxTradesPerDay": 3
+    }
+  },
+  {
+    "id": 2,
+    "slug": "balanced-rotation",
+    "name": "Balanced Rotation",
+    "risk": "BALANCED",
+    "minimumTier": 1,
+    "creatorFeeShareBps": 0,
+    "rules": {
+      "reserveBps": 4500,
+      "rebalanceThresholdBps": 700,
+      "maxTradeUsd": 250,
+      "maxAssets": 4,
+      "momentumOnly": false,
+      "cooldownSeconds": 7200,
+      "maxTradesPerDay": 6
+    }
+  },
+  {
+    "id": 3,
+    "slug": "active-momentum",
+    "name": "Active Momentum",
+    "risk": "ACTIVE",
+    "minimumTier": 2,
+    "creatorFeeShareBps": 0,
+    "rules": {
+      "reserveBps": 2500,
+      "rebalanceThresholdBps": 500,
+      "maxTradeUsd": 500,
+      "maxAssets": 6,
+      "momentumOnly": true,
+      "cooldownSeconds": 1800,
+      "maxTradesPerDay": 12
+    }
+  }
+]

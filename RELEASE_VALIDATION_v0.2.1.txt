@@ -1,0 +1,43 @@
+FLOWCONTROL AI Trader — Onyx v0.2.1
+Release validation generated: 2026-07-24T00:41:25Z
+
+LOCAL CHECKS COMPLETED
+----------------------
+Solidity files: 18
+TS/TSX files: 23
+JSON: PASS
+Static safety scan: PASS
+Security scan: PASS
+Scanned files: 81
+Checked secrets, Solidity primitives/imports, signatures, live gates, dependency pins, workflows, and execution invariants.
+Workflow YAML: PASS
+Workflow shell syntax: PASS
+SQLite migration: PASS
+Vault issued_at replay column: PASS
+Rate-limit table: PASS
+TypeScript/TSX syntax: PASS (22 files)
+JavaScript syntax: PASS
+GitHub Actions use current Node-24-based major versions: PASS
+Default Worker live gate false: PASS
+Default D1 execution pause true: PASS
+Signed registration binds owner/vault/strategy/referrer/expiry/issuedAt: PASS
+Stale registration replay rejection: PASS
+On-chain strategy/tier/executor registration checks present: PASS
+Manual and automated fee-aware quote calculation present: PASS
+Fresh-market-only automation query present: PASS
+Owner transaction simulation before broadcast present: PASS
+
+NOT COMPLETED IN THIS ENVIRONMENT
+---------------------------------
+The package registry was unreachable, so dependencies could not be installed here. Therefore the following must pass in the included FLOWCONTROL CI workflow before deployment:
+- Hardhat Solidity compilation
+- Solidity unit tests
+- Keeper Vitest tests
+- Full TypeScript type checking
+- Vite production build
+- Cloudflare Worker build
+- Live Onyx fork dependency and quote tests
+
+RELEASE STATUS
+--------------
+Mainnet-capable source candidate only. Not deployed. Not independently audited. Live execution ships disabled behind two separate gates. Do not accept public deposits or enable real automated execution until every item in docs/04_PRODUCTION_GATES.md is complete.

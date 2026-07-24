@@ -1,0 +1,4 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";import {ISwapAdapter} from "../interfaces/ISwapAdapter.sol";
+contract MockSwapAdapter is ISwapAdapter {using SafeERC20 for IERC20;uint256 public n=1;uint256 public d=1;function setRate(uint256 n_,uint256 d_) external{require(d_>0);n=n_;d=d_;}function quote(address,address,uint256 amountIn,bytes calldata) external view returns(uint256){return amountIn*n/d;}function swap(address tokenIn,address tokenOut,uint256 amountIn,uint256 minOut,address recipient,bytes calldata) external returns(uint256 amountOut){IERC20(tokenIn).safeTransferFrom(msg.sender,address(this),amountIn);amountOut=amountIn*n/d;require(amountOut>=minOut,"OUTPUT");IERC20(tokenOut).safeTransfer(recipient,amountOut);}}

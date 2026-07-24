@@ -1,0 +1,6 @@
+{
+  "buildCommand": "npm run build -w @flowcontrol/web",
+  "outputDirectory": "apps/web/dist",
+  "framework": "vite",
+  "installCommand": "npm install"
+}

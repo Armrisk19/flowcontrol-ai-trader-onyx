@@ -1,0 +1,21 @@
+{
+  "chainId": 327,
+  "chainIdHex": "0x147",
+  "rpcUrl": "https://rpc.onyx.org",
+  "explorerUrl": "https://explorer.onyx.org",
+  "contracts": {
+    "v2Factory": "0x008c99EedA17E193e5F788536234C6b3520B8D15",
+    "v2Router": "0xa973c5626eEaF7F482439753953e9B28C6aF3674",
+    "WXCN": "0x1a0Da75ADf091a69E7285e596bB27218D77E17a9",
+    "WETH": "0x9253587505c3B7E7b9DEE118AE1AcB53eEC0E4b6",
+    "USDC": "0xC8410270bb53f6c99A2EFe6eD3686a8630Efe22B",
+    "XCN_USDC_PAIR": "0x57541cC904E863d6CBEe5Dbe5F55aCA799BC0e9F",
+    "WETH_USDC_PAIR": "0x6dc9C9E36a19a57A6cbe9E724a74bD4d98D2EE12"
+  },
+  "runtimeVerification": [
+    "eth_chainId == 0x147",
+    "eth_getCode(factory/router/tokens/pairs) != 0x",
+    "router.factory() == configured factory",
+    "factory.getPair(tokenA,tokenB) == configured pair"
+  ]
+}

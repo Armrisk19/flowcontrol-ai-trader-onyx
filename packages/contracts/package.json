@@ -1,0 +1,24 @@
+{
+  "name": "@flowcontrol/contracts",
+  "version": "0.2.1",
+  "private": true,
+  "scripts": {
+    "build": "hardhat compile",
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "test:fork": "hardhat test test/OnyxFork.test.ts",
+    "deploy:onyx": "hardhat run scripts/deploy.ts --network onyx",
+    "verify:onyx": "hardhat run scripts/verify-live-addresses.ts --network onyx",
+    "build:token-config": "hardhat run scripts/build-token-config.ts --network onyx"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "5.4.0"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "6.1.0",
+    "dotenv": "17.2.1",
+    "hardhat": "2.26.2",
+    "ts-node": "10.9.2",
+    "typescript": "5.8.3"
+  }
+}
