@@ -109,6 +109,42 @@ function amountForUsd(usd: number, price: number, decimals: number): bigint {
   return parseUnits(units.toFixed(precision), decimals);
 }
 
+function compactError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\s+/g, " ").slice(0, 240);
+}
+
+async function quoteWithRetry(
+  env: Env,
+  amountIn: bigint,
+  path: readonly Address[],
+): Promise<{ amounts: readonly bigint[] | null; error: string }> {
+  const client = publicFor(env);
+  let lastError = "";
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const amounts = await client.readContract({
+        address: env.V2_ROUTER,
+        abi: routerAbi,
+        functionName: "getAmountsOut",
+        args: [amountIn, [...path]],
+      });
+      if (amounts.length < 2 || amounts[amounts.length - 1] <= 0n) {
+        throw new Error("EMPTY_ROUTER_QUOTE");
+      }
+      return { amounts, error: "" };
+    } catch (error) {
+      lastError = compactError(error);
+      if (attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+      }
+    }
+  }
+
+  return { amounts: null, error: lastError || "ROUTER_QUOTE_FAILED" };
+}
+
 async function roundTripCapacity(
   env: Env,
   token0: Address,
@@ -116,36 +152,62 @@ async function roundTripCapacity(
   decimals0: number,
   price0: number,
 ) {
-  if (price0 <= 0) return { safe: 0, costBps: 99_999 };
-  const client = publicFor(env);
-  let safe = 0;
-  let costBps = 99_999;
+  if (price0 <= 0) {
+    return {
+      activeSafe: 0,
+      limitedSafe: 0,
+      activeCostBps: 99_999,
+      limitedCostBps: 99_999,
+      quoteError: "INVALID_USDC_PRICE",
+    };
+  }
+
+  let activeSafe = 0;
+  let limitedSafe = 0;
+  let activeCostBps = 99_999;
+  let limitedCostBps = 99_999;
+  let quoteError = "";
 
   for (const usd of USD_TIERS) {
-    try {
-      const input = amountForUsd(usd, price0, decimals0);
-      if (input <= 0n) break;
-      const outbound = await client.readContract({
-        address: env.V2_ROUTER, abi: routerAbi, functionName: "getAmountsOut",
-        args: [input, [token0, token1]],
-      });
-      const inbound = await client.readContract({
-        address: env.V2_ROUTER, abi: routerAbi, functionName: "getAmountsOut",
-        args: [outbound[1], [token1, token0]],
-      });
-      const returned = inbound[1] > input ? input : inbound[1];
-      const cost = Number((input - returned) * 10_000n / input);
-      if (cost <= 150) {
-        safe = usd;
-        costBps = cost;
-      } else {
-        break;
-      }
-    } catch {
+    const input = amountForUsd(usd, price0, decimals0);
+    if (input <= 0n) break;
+
+    const outbound = await quoteWithRetry(env, input, [token0, token1]);
+    if (!outbound.amounts) {
+      quoteError = `OUTBOUND: ${outbound.error}`;
+      break;
+    }
+
+    const outputAmount = outbound.amounts[outbound.amounts.length - 1];
+    const inbound = await quoteWithRetry(env, outputAmount, [token1, token0]);
+    if (!inbound.amounts) {
+      quoteError = `RETURN: ${inbound.error}`;
+      break;
+    }
+
+    const returnedAmount = inbound.amounts[inbound.amounts.length - 1];
+    const returned = returnedAmount > input ? input : returnedAmount;
+    const cost = Number((input - returned) * 10_000n / input);
+
+    if (cost <= 100) {
+      activeSafe = usd;
+      activeCostBps = cost;
+    }
+    if (cost <= 150) {
+      limitedSafe = usd;
+      limitedCostBps = cost;
+    } else {
       break;
     }
   }
-  return { safe, costBps };
+
+  return {
+    activeSafe,
+    limitedSafe,
+    activeCostBps,
+    limitedCostBps,
+    quoteError,
+  };
 }
 
 export async function assessMarkets(env: Env) {
@@ -175,7 +237,16 @@ export async function assessMarkets(env: Env) {
       const price1 = token0IsUsdc && amount1 > 0 ? amount0 / amount1 : fallbackPrice1;
 
       const liquidity = amount0 * price0 + amount1 * price1;
-      const capacity = await roundTripCapacity(env, token0, token1, row.decimals0, price0);
+      const canonicalUsdcPair = token0IsUsdc || token1IsUsdc;
+      const capacity = canonicalUsdcPair
+        ? await roundTripCapacity(env, token0, token1, row.decimals0, price0)
+        : {
+            activeSafe: 0,
+            limitedSafe: 0,
+            activeCostBps: 99_999,
+            limitedCostBps: 99_999,
+            quoteError: "PAIR_DOES_NOT_USE_CANONICAL_USDC",
+          };
       const registryOk = approved0 && approved1;
       const observation = await env.DB.prepare(`
         SELECT (julianday('now')-julianday(observed_since))*1440 AS minutes
@@ -184,24 +255,59 @@ export async function assessMarkets(env: Env) {
       const oldEnough = row.official === 1
         || Number(observation?.minutes || 0) >= Number(env.MIN_MARKET_OBSERVATION_MINUTES || 1440);
 
-      let status: MarketStatus;
-      if (liquidity < 10_000 || capacity.safe === 0) status = "PAUSED";
-      else if (row.reviewed !== 1 || !registryOk || !oldEnough) status = "WATCHLIST";
-      else if (capacity.safe >= 500 && capacity.costBps <= 100) status = "ACTIVE";
-      else if (capacity.safe >= 100 && capacity.costBps <= 150) status = "LIMITED";
-      else status = "PAUSED";
+      let status: MarketStatus = "PAUSED";
+      let assessmentReason = "ROUND_TRIP_COST_TOO_HIGH";
+      let safeTradeUsd = 0;
+      let selectedCostBps = 99_999;
+
+      if (!canonicalUsdcPair) {
+        assessmentReason = "NON_CANONICAL_USDC_PAIR";
+      } else if (liquidity < 10_000) {
+        assessmentReason = "LOW_LIQUIDITY";
+      } else if (capacity.limitedSafe === 0) {
+        assessmentReason = capacity.quoteError
+          ? "ROUTER_QUOTE_UNAVAILABLE"
+          : "ROUND_TRIP_COST_TOO_HIGH";
+      } else if (row.reviewed !== 1) {
+        status = "WATCHLIST";
+        assessmentReason = "AWAITING_REVIEW";
+        safeTradeUsd = capacity.limitedSafe;
+        selectedCostBps = capacity.limitedCostBps;
+      } else if (!registryOk) {
+        status = "WATCHLIST";
+        assessmentReason = "TOKEN_REGISTRY_APPROVAL_REQUIRED";
+        safeTradeUsd = capacity.limitedSafe;
+        selectedCostBps = capacity.limitedCostBps;
+      } else if (!oldEnough) {
+        status = "WATCHLIST";
+        assessmentReason = "OBSERVATION_PERIOD";
+        safeTradeUsd = capacity.limitedSafe;
+        selectedCostBps = capacity.limitedCostBps;
+      } else if (capacity.activeSafe >= 500) {
+        status = "ACTIVE";
+        assessmentReason = "ACTIVE_COST_TIER";
+        safeTradeUsd = capacity.activeSafe;
+        selectedCostBps = capacity.activeCostBps;
+      } else if (capacity.limitedSafe >= 100) {
+        status = "LIMITED";
+        assessmentReason = "LIMITED_COST_TIER";
+        safeTradeUsd = capacity.limitedSafe;
+        selectedCostBps = capacity.limitedCostBps;
+      }
 
       const assetUsdcPrice = token0.toLowerCase() === env.USDC.toLowerCase()
         ? price1
         : token1.toLowerCase() === env.USDC.toLowerCase() ? price0 : 0;
 
       await env.DB.prepare(`
-        UPDATE markets SET status=?,liquidity_usd=?,safe_trade_usd=?,round_trip_cost_bps=?,
-          asset_usdc_price=?,registry_approved=?,last_block=?,updated_at=datetime('now'),last_assessed_at=datetime('now')
+        UPDATE markets SET status=?,liquidity_usd=?,safe_trade_usd=?,active_safe_trade_usd=?,
+          round_trip_cost_bps=?,asset_usdc_price=?,registry_approved=?,assessment_reason=?,
+          quote_error=?,last_block=?,updated_at=datetime('now'),last_assessed_at=datetime('now')
         WHERE pair_address=?
       `).bind(
-        status, liquidity, capacity.safe, capacity.costBps, assetUsdcPrice,
-        registryOk ? 1 : 0, Number(block), row.pair_address,
+        status, liquidity, safeTradeUsd, capacity.activeSafe, selectedCostBps,
+        assetUsdcPrice, registryOk ? 1 : 0, assessmentReason, capacity.quoteError,
+        Number(block), row.pair_address,
       ).run();
 
       if (assetUsdcPrice > 0) {
@@ -247,8 +353,11 @@ export async function listMarkets(env: Env) {
     status: row.status,
     liquidityUsd: row.liquidity_usd,
     safeTradeUsd: row.safe_trade_usd,
+    activeSafeTradeUsd: row.active_safe_trade_usd,
     roundTripCostBps: Math.round(row.round_trip_cost_bps),
     assetUsdcPrice: row.asset_usdc_price,
+    assessmentReason: row.assessment_reason,
+    quoteError: row.quote_error || null,
     reviewed: row.reviewed === 1,
     registryApproved: row.registry_approved === 1,
     official: row.official === 1,

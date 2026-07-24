@@ -118,7 +118,7 @@ export default {
         `).first<{ total: number; active: number; limited: number }>();
         return json(env, {
           ok: true,
-          version: "0.2.15",
+          version: "0.2.16",
           runtime,
           markets: counts || { total: 0, active: 0, limited: 0 },
           configuredLive: env.LIVE_EXECUTION === "true",

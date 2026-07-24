@@ -40,8 +40,11 @@ export interface MarketRow {
   status: MarketStatus;
   liquidity_usd: number;
   safe_trade_usd: number;
+  active_safe_trade_usd: number;
   round_trip_cost_bps: number;
   asset_usdc_price: number;
+  assessment_reason: string;
+  quote_error: string;
   updated_at: string;
   reviewed: number;
   registry_approved: number;
