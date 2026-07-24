@@ -1,0 +1,49 @@
+name: FLOWCONTROL CI
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+  pull_request: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.14.0'
+          package-manager-cache: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python scripts/validate.py
+      - run: python scripts/security_scan.py
+      - run: npm install
+      - run: npm run compile
+      - run: npm test
+      - run: npm run build
+
+  onyx-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.14.0'
+          package-manager-cache: false
+      - run: npm install
+      - name: Verify live Onyx contracts and pools
+        env:
+          ONYX_RPC_URL: 'https://rpc.onyx.org'
+        run: |
+          for attempt in 1 2 3; do
+            if npm run verify:onyx -w @flowcontrol/contracts; then
+              exit 0
+            fi
+            echo "Onyx RPC verification attempt ${attempt} failed."
+            sleep $((attempt * 10))
+          done
+          exit 1
