@@ -5,7 +5,7 @@ workers_dev = true
 
 [vars]
 ONYX_RPC_URL = "https://rpc.onyx.org"
-ONYX_RPC_FALLBACK_URL = ""
+ONYX_RPC_FALLBACK_URL = "https://rpc.goliath.net"
 CHAIN_ID = "327"
 V2_FACTORY = "0x008c99EedA17E193e5F788536234C6b3520B8D15"
 V2_ROUTER = "0xa973c5626eEaF7F482439753953e9B28C6aF3674"
