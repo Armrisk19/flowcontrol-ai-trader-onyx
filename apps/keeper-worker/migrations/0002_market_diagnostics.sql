@@ -1,0 +1,3 @@
+ALTER TABLE markets ADD COLUMN active_safe_trade_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE markets ADD COLUMN assessment_reason TEXT NOT NULL DEFAULT 'PENDING';
+ALTER TABLE markets ADD COLUMN quote_error TEXT NOT NULL DEFAULT '';
