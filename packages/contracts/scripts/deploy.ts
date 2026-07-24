@@ -10,13 +10,98 @@ const LIVE = {
   USDC: "0xC8410270bb53f6c99A2EFe6eD3686a8630Efe22B",
 } as const;
 
-const DEPLOY_GAS_LIMIT = 8_000_000n;
-const ADMIN_GAS_LIMIT = 2_000_000n;
 const CONFIRMATIONS = 2;
 const CODE_POLL_ATTEMPTS = 60;
 const CODE_POLL_MS = 2_000;
+const ESTIMATE_ATTEMPTS = 30;
+const ESTIMATE_RETRY_MS = 2_000;
+const BPS = 10_000n;
+const GAS_LIMIT_BUFFER_BPS = 12_000n;
+const GAS_PRICE_BUFFER_BPS = BigInt(process.env.ONYX_GAS_PRICE_BUFFER_BPS || "12500");
+const MAX_GAS_PRICE = ethers.parseUnits(
+  process.env.MAX_ONYX_GAS_PRICE_GWEI || "2500",
+  "gwei",
+);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function currentGasPrice(): Promise<bigint> {
+  const raw = await ethers.provider.send("eth_gasPrice", []);
+  const quoted = BigInt(raw);
+  if (quoted <= 0n) throw new Error("Onyx RPC returned an invalid gas price");
+
+  const buffered = (quoted * GAS_PRICE_BUFFER_BPS + BPS - 1n) / BPS;
+  if (buffered > MAX_GAS_PRICE) {
+    throw new Error(
+      `Onyx gas price ${ethers.formatUnits(buffered, "gwei")} gwei exceeds the configured safety cap ` +
+      `${ethers.formatUnits(MAX_GAS_PRICE, "gwei")} gwei`,
+    );
+  }
+  return buffered;
+}
+
+async function estimateGasWithRetry(
+  label: string,
+  signer: any,
+  request: any,
+): Promise<bigint> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= ESTIMATE_ATTEMPTS; attempt += 1) {
+    try {
+      return await signer.estimateGas(request);
+    } catch (error) {
+      lastError = error;
+      const message = errorMessage(error);
+      const retryable =
+        message.includes("BAD_INIT") ||
+        message.includes("Requested resource not found") ||
+        message.includes("UNKNOWN") ||
+        message.includes("BUSY");
+
+      if (!retryable || attempt === ESTIMATE_ATTEMPTS) throw error;
+      console.log(
+        `${label}: RPC state not ready for gas estimation ` +
+        `(attempt ${attempt}/${ESTIMATE_ATTEMPTS}); retrying`,
+      );
+      await sleep(ESTIMATE_RETRY_MS);
+    }
+  }
+  throw lastError;
+}
+
+async function transactionOverrides(
+  label: string,
+  signer: any,
+  request: any,
+): Promise<{ gasLimit: bigint; gasPrice: bigint; type: 0 }> {
+  const estimate = await estimateGasWithRetry(label, signer, request);
+  const gasLimit = (estimate * GAS_LIMIT_BUFFER_BPS + BPS - 1n) / BPS;
+  const gasPrice = await currentGasPrice();
+  const maximumFee = gasLimit * gasPrice;
+  const balance = await ethers.provider.getBalance(await signer.getAddress());
+
+  if (balance < maximumFee) {
+    throw new Error(
+      `${label}: deployer balance ${ethers.formatEther(balance)} XCN is below the ` +
+      `maximum transaction fee ${ethers.formatEther(maximumFee)} XCN. ` +
+      `Fund the Temporary Deployer with native XCN on Onyx and retry.`,
+    );
+  }
+
+  console.log(
+    `${label}: estimate=${estimate} gas, limit=${gasLimit}, ` +
+    `gasPrice=${ethers.formatUnits(gasPrice, "gwei")} gwei, ` +
+    `maxFee=${ethers.formatEther(maximumFee)} XCN`,
+  );
+
+  // Onyx's gateway is most reliable for deployment when given the live legacy
+  // gas price explicitly instead of an inferred EIP-1559 fee tuple.
+  return { gasLimit, gasPrice, type: 0 };
+}
 
 async function confirmDeployment(label: string, contract: any): Promise<string> {
   const tx = contract.deploymentTransaction();
@@ -31,19 +116,47 @@ async function confirmDeployment(label: string, contract: any): Promise<string> 
   for (let attempt = 1; attempt <= CODE_POLL_ATTEMPTS; attempt += 1) {
     const code = await ethers.provider.getCode(address);
     if (code !== "0x") {
-      console.log(`${label}: ${address} (code visible after ${attempt} check${attempt === 1 ? "" : "s"})`);
+      console.log(
+        `${label}: ${address} ` +
+        `(code visible after ${attempt} check${attempt === 1 ? "" : "s"})`,
+      );
       return address;
     }
     await sleep(CODE_POLL_MS);
   }
 
-  throw new Error(`${label} was mined but bytecode was not visible through the RPC after ${CODE_POLL_ATTEMPTS * CODE_POLL_MS / 1000}s`);
+  throw new Error(
+    `${label} was mined but bytecode was not visible through the RPC after ` +
+    `${CODE_POLL_ATTEMPTS * CODE_POLL_MS / 1000}s`,
+  );
 }
 
-async function sendAndConfirm(label: string, transactionPromise: Promise<any>): Promise<void> {
-  const transaction = await transactionPromise;
+async function deployAndConfirm(
+  label: string,
+  signer: any,
+  factory: any,
+  args: readonly unknown[],
+): Promise<{ contract: any; address: string }> {
+  const draft = await factory.getDeployTransaction(...args);
+  const overrides = await transactionOverrides(label, signer, draft);
+  const contract = await factory.deploy(...args, overrides);
+  const address = await confirmDeployment(label, contract);
+  return { contract, address };
+}
+
+async function sendAndConfirm(
+  label: string,
+  signer: any,
+  method: any,
+  args: readonly unknown[],
+): Promise<void> {
+  const draft = await method.populateTransaction(...args);
+  const overrides = await transactionOverrides(label, signer, draft);
+  const transaction = await method(...args, overrides);
   const receipt = await transaction.wait(CONFIRMATIONS);
-  if (!receipt || receipt.status !== 1) throw new Error(`${label} transaction failed`);
+  if (!receipt || receipt.status !== 1) {
+    throw new Error(`${label} transaction failed`);
+  }
   console.log(`${label}: confirmed`);
 }
 
@@ -78,96 +191,111 @@ async function main() {
   }
 
   const Tier = await ethers.getContractFactory("FlowTierManager");
-  const tier = await Tier.deploy(deployer.address, { gasLimit: DEPLOY_GAS_LIMIT });
-  const tierAddress = await confirmDeployment("FlowTierManager", tier);
+  const { contract: tier, address: tierAddress } = await deployAndConfirm(
+    "FlowTierManager",
+    deployer,
+    Tier,
+    [deployer.address],
+  );
 
   const Token = await ethers.getContractFactory("FlowTokenRegistry");
-  const token = await Token.deploy(deployer.address, { gasLimit: DEPLOY_GAS_LIMIT });
-  const tokenAddress = await confirmDeployment("FlowTokenRegistry", token);
+  const { contract: token, address: tokenAddress } = await deployAndConfirm(
+    "FlowTokenRegistry",
+    deployer,
+    Token,
+    [deployer.address],
+  );
 
   const Strategy = await ethers.getContractFactory("FlowStrategyRegistry");
-  const strategy = await Strategy.deploy(
-    deployer.address,
-    tierAddress,
-    { gasLimit: DEPLOY_GAS_LIMIT },
+  const { contract: strategy, address: strategyAddress } = await deployAndConfirm(
+    "FlowStrategyRegistry",
+    deployer,
+    Strategy,
+    [deployer.address, tierAddress],
   );
-  const strategyAddress = await confirmDeployment("FlowStrategyRegistry", strategy);
 
   const Fee = await ethers.getContractFactory("FlowFeeRouter");
-  const fee = await Fee.deploy(
-    deployer.address,
-    treasury,
-    reserve,
-    { gasLimit: DEPLOY_GAS_LIMIT },
+  const { contract: fee, address: feeAddress } = await deployAndConfirm(
+    "FlowFeeRouter",
+    deployer,
+    Fee,
+    [deployer.address, treasury, reserve],
   );
-  const feeAddress = await confirmDeployment("FlowFeeRouter", fee);
 
   const Execution = await ethers.getContractFactory("FlowExecutionRouter");
-  const execution = await Execution.deploy(
-    deployer.address,
-    tokenAddress,
-    strategyAddress,
-    feeAddress,
-    tierAddress,
-    { gasLimit: DEPLOY_GAS_LIMIT },
+  const { contract: execution, address: executionAddress } = await deployAndConfirm(
+    "FlowExecutionRouter",
+    deployer,
+    Execution,
+    [deployer.address, tokenAddress, strategyAddress, feeAddress, tierAddress],
   );
-  const executionAddress = await confirmDeployment("FlowExecutionRouter", execution);
 
   const Factory = await ethers.getContractFactory("FlowVaultFactory");
-  const vaultFactory = await Factory.deploy(
-    executionAddress,
-    LIVE.WXCN,
-    { gasLimit: DEPLOY_GAS_LIMIT },
+  const { contract: vaultFactory, address: vaultFactoryAddress } = await deployAndConfirm(
+    "FlowVaultFactory",
+    deployer,
+    Factory,
+    [executionAddress, LIVE.WXCN],
   );
-  const vaultFactoryAddress = await confirmDeployment("FlowVaultFactory", vaultFactory);
 
   const Adapter = await ethers.getContractFactory("OnyxV2Adapter");
-  const adapter = await Adapter.deploy(
-    deployer.address,
-    LIVE.router,
-    LIVE.factory,
-    { gasLimit: DEPLOY_GAS_LIMIT },
+  const { contract: adapter, address: adapterAddress } = await deployAndConfirm(
+    "OnyxV2Adapter",
+    deployer,
+    Adapter,
+    [deployer.address, LIVE.router, LIVE.factory],
   );
-  const adapterAddress = await confirmDeployment("OnyxV2Adapter", adapter);
 
   const Membership = await ethers.getContractFactory("FlowMembership");
-  const membership = await Membership.deploy(
-    deployer.address,
-    LIVE.WXCN,
-    tierAddress,
-    treasury,
-    { gasLimit: DEPLOY_GAS_LIMIT },
+  const { contract: membership, address: membershipAddress } = await deployAndConfirm(
+    "FlowMembership",
+    deployer,
+    Membership,
+    [deployer.address, LIVE.WXCN, tierAddress, treasury],
   );
-  const membershipAddress = await confirmDeployment("FlowMembership", membership);
 
   await sendAndConfirm(
     "Set vault factory",
-    execution.setVaultFactory(vaultFactoryAddress, { gasLimit: ADMIN_GAS_LIMIT }),
+    deployer,
+    execution.setVaultFactory,
+    [vaultFactoryAddress],
   );
   await sendAndConfirm(
     "Enable Onyx adapter",
-    execution.setAdapter(adapterAddress, true, { gasLimit: ADMIN_GAS_LIMIT }),
+    deployer,
+    execution.setAdapter,
+    [adapterAddress, true],
   );
   await sendAndConfirm(
     "Grant adapter caller role",
-    adapter.grantRole(await adapter.CALLER_ROLE(), executionAddress, { gasLimit: ADMIN_GAS_LIMIT }),
+    deployer,
+    adapter.grantRole,
+    [await adapter.CALLER_ROLE(), executionAddress],
   );
   await sendAndConfirm(
     "Grant fee distributor role",
-    fee.grantRole(await fee.DISTRIBUTOR_ROLE(), executionAddress, { gasLimit: ADMIN_GAS_LIMIT }),
+    deployer,
+    fee.grantRole,
+    [await fee.DISTRIBUTOR_ROLE(), executionAddress],
   );
 
   await sendAndConfirm(
     "Configure USDC",
-    token.configureToken(LIVE.USDC, 3, 5_000_000_000n, 100, 6, { gasLimit: ADMIN_GAS_LIMIT }),
+    deployer,
+    token.configureToken,
+    [LIVE.USDC, 3, 5_000_000_000n, 100, 6],
   );
   await sendAndConfirm(
     "Configure WXCN",
-    token.configureToken(LIVE.WXCN, 3, ethers.parseUnits("1000000", 18), 125, 18, { gasLimit: ADMIN_GAS_LIMIT }),
+    deployer,
+    token.configureToken,
+    [LIVE.WXCN, 3, ethers.parseUnits("1000000", 18), 125, 18],
   );
   await sendAndConfirm(
     "Configure WETH",
-    token.configureToken(LIVE.WETH, 3, ethers.parseUnits("2", 18), 100, 18, { gasLimit: ADMIN_GAS_LIMIT }),
+    deployer,
+    token.configureToken,
+    [LIVE.WETH, 3, ethers.parseUnits("2", 18), 100, 18],
   );
 
   const officialStrategies = [
@@ -187,30 +315,42 @@ async function main() {
   for (const item of officialStrategies) {
     await sendAndConfirm(
       `Submit strategy ${item.uri}`,
-      strategy.submitStrategy(item.uri, treasury, item.rules, { gasLimit: ADMIN_GAS_LIMIT }),
+      deployer,
+      strategy.submitStrategy,
+      [item.uri, treasury, item.rules],
     );
     const id = (await strategy.nextStrategyId()) - 1n;
     await sendAndConfirm(
       `Review strategy ${id}`,
-      strategy.reviewStrategy(id, true, 0, item.minimumTier, { gasLimit: ADMIN_GAS_LIMIT }),
+      deployer,
+      strategy.reviewStrategy,
+      [id, true, 0, item.minimumTier],
     );
   }
 
   await sendAndConfirm(
     "Configure Flow plan",
-    membership.configurePlan(1, xcnPlan("FLOW_PLAN_XCN", "5000"), 30 * 86400, true, { gasLimit: ADMIN_GAS_LIMIT }),
+    deployer,
+    membership.configurePlan,
+    [1, xcnPlan("FLOW_PLAN_XCN", "5000"), 30 * 86400, true],
   );
   await sendAndConfirm(
     "Configure Pro plan",
-    membership.configurePlan(2, xcnPlan("PRO_PLAN_XCN", "15000"), 30 * 86400, true, { gasLimit: ADMIN_GAS_LIMIT }),
+    deployer,
+    membership.configurePlan,
+    [2, xcnPlan("PRO_PLAN_XCN", "15000"), 30 * 86400, true],
   );
   await sendAndConfirm(
     "Configure Creator plan",
-    membership.configurePlan(3, xcnPlan("CREATOR_PLAN_XCN", "30000"), 30 * 86400, true, { gasLimit: ADMIN_GAS_LIMIT }),
+    deployer,
+    membership.configurePlan,
+    [3, xcnPlan("CREATOR_PLAN_XCN", "30000"), 30 * 86400, true],
   );
   await sendAndConfirm(
     "Authorize membership tier grants",
-    tier.grantRole(await tier.TIER_ADMIN_ROLE(), membershipAddress, { gasLimit: ADMIN_GAS_LIMIT }),
+    deployer,
+    tier.grantRole,
+    [await tier.TIER_ADMIN_ROLE(), membershipAddress],
   );
 
   const contracts: any[] = [tier, token, strategy, fee, execution, adapter, membership];
@@ -218,7 +358,9 @@ async function main() {
   for (const contract of contracts) {
     await sendAndConfirm(
       "Grant final admin role",
-      contract.grantRole(adminRole, finalAdmin, { gasLimit: ADMIN_GAS_LIMIT }),
+      deployer,
+      contract.grantRole,
+      [adminRole, finalAdmin],
     );
   }
 
@@ -232,25 +374,31 @@ async function main() {
   for (const [contract, role] of operationalRoles) {
     await sendAndConfirm(
       "Grant final operational role",
-      contract.grantRole(role, finalAdmin, { gasLimit: ADMIN_GAS_LIMIT }),
+      deployer,
+      contract.grantRole,
+      [role, finalAdmin],
     );
   }
 
   for (const [contract, role] of operationalRoles) {
     await sendAndConfirm(
       "Renounce deployer operational role",
-      contract.renounceRole(role, deployer.address, { gasLimit: ADMIN_GAS_LIMIT }),
+      deployer,
+      contract.renounceRole,
+      [role, deployer.address],
     );
   }
   for (const contract of contracts) {
     await sendAndConfirm(
       "Renounce deployer admin role",
-      contract.renounceRole(adminRole, deployer.address, { gasLimit: ADMIN_GAS_LIMIT }),
+      deployer,
+      contract.renounceRole,
+      [adminRole, deployer.address],
     );
   }
 
   const addresses = {
-    version: "0.2.7",
+    version: "0.2.8",
     chainId: 327,
     deployedAt: new Date().toISOString(),
     deployer: deployer.address,
