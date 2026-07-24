@@ -2,6 +2,6 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
   "installCommand": "npm install",
-  "buildCommand": "npm run build -w @flowcontrol/web && if [ -d apps/web/dist ]; then rm -rf dist && cp -R apps/web/dist dist; elif [ -d dist ]; then echo 'Using workspace dist output'; else echo 'ERROR: Vite output directory was not created'; pwd; find . -maxdepth 4 -type d -name dist -print; exit 1; fi",
+  "buildCommand": "bash scripts/vercel-build.sh",
   "outputDirectory": "dist"
 }
